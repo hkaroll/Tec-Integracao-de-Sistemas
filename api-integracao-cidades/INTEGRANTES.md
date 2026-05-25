@@ -3,8 +3,8 @@
 | Nome Completo | Matrícula | Papel |
 | :--- | :--- | :--- |
 | Hevlina Karoll Lima Reis | 2425124 | Desenvolvedora Backend (Infraestrutura) |
-| Integrante 2 | 0000000 | Desenvolvedor Backend (Localização) |
-| Integrante 3 | 0000000 | Desenvolvedor Backend (Clima) |
-| Integrante 4 | 0000000 | Desenvolvedor Backend (Listagem) |
-| Integrante 5 | 0000000 | QA / Testes Automatizados |
-| Integrante 6 | 0000000 | Documentação |
+| Francisco Erasmo Pires Abreu | 2415473 | Desenvolvedor Backend (Localização) |
+| Higor Reis de Sátiro | 2425093 | Desenvolvedor Backend (Clima) |
+| Mayra Ribeiro da Silva | 2425026 | Desenvolvedor Backend (Listagem) |
+| Ana Beatriz da Silva de Oliveira | 2425104 | QA / Testes Automatizados |
+| Levi Martins Marques | 2425085 | Documentação |
