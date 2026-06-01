@@ -8,6 +8,12 @@ const PORT = 3000;
 app.use(cors()); // Habilita o CORS para testes no navegador
 app.use(express.json()); // Garante suporte a respostas em JSON
 
+// Função auxiliar para normalizar nomes de cidades (remover acentos e padronizar)
+const normalizarNome = (nome) => {
+    return nome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+};
+
+
 // ==========================================
 // ENDPOINT 1: Clima da Cidade (IMPLEMENTADO)
 // Rota: GET /api/v1/clima/{nome_cidade}
@@ -15,7 +21,7 @@ app.use(express.json()); // Garante suporte a respostas em JSON
 app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
     const { nome_cidade } = req.params;
 
-    // Validação do nome da cidade (mínimo 2 caracteres)
+    // Validação do nome da cidade
     if (!nome_cidade || nome_cidade.length < 2) {
         return res.status(400).json({
             erro: true,
@@ -26,55 +32,62 @@ app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
     }
 
     try {
-        // Passo 1: Buscar o ID da cidade na Brasil API
+        // Passo 1: Obter ID da cidade (para clima) e UF (para IBGE)
         const cidadeResponse = await fetch(`https://brasilapi.com.br/api/cptec/v1/cidade/${encodeURIComponent(nome_cidade)}`);
-        
-        // CORREÇÃO: Tratar o 404 da API externa como "Cidade não encontrada"
         if (cidadeResponse.status === 404) {
-            return res.status(404).json({
-                erro: true,
-                codigo: "CIDADE_NAO_ENCONTRADA",
-                mensagem: "Nenhuma cidade encontrada com o nome informado",
-                nome_informado: nome_cidade
-            });
+            return res.status(404).json({ erro: true, codigo: "CIDADE_NAO_ENCONTRADA", mensagem: "Nenhuma cidade encontrada com o nome informado (CPTEC)", nome_informado: nome_cidade });
         }
-
-        // Se a resposta não for OK (mas não for 404), aí sim é um erro de serviço
-        if (!cidadeResponse.ok) {
-            throw new Error('Erro ao buscar cidade na Brasil API');
-        }
-
+        if (!cidadeResponse.ok) throw new Error('Erro ao buscar dados da cidade na Brasil API.');
+        
         const cidades = await cidadeResponse.json();
-
         if (cidades.length === 0) {
-            return res.status(404).json({
-                erro: true,
-                codigo: "CIDADE_NAO_ENCONTRADA",
-                mensagem: "Nenhuma cidade encontrada com o nome informado",
-                nome_informado: nome_cidade
-            });
+            return res.status(404).json({ erro: true, codigo: "CIDADE_NAO_ENCONTRADA", mensagem: "Nenhuma cidade encontrada com o nome informado", nome_informado: nome_cidade });
         }
-
-        // Usar a primeira cidade encontrada
+        
         const cidadeEncontrada = cidades[0];
         const { nome, estado, id: cidadeId } = cidadeEncontrada;
 
-        // Passo 2: Com o ID, buscar os dados climáticos
-        const climaResponse = await fetch(`https://brasilapi.com.br/api/cptec/v1/clima/previsao/${cidadeId}`);
-        
-        if (!climaResponse.ok) {
-            throw new Error('Erro ao buscar clima na Brasil API');
-        }
+        // Passo 2: Buscar dados de geolocalização e clima em paralelo
+        const [geoResponse, climaResponse] = await Promise.all([
+            fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(nome)}&language=pt&count=1`),
+            fetch(`https://brasilapi.com.br/api/cptec/v1/clima/previsao/${cidadeId}`)
+        ]);
+
+        // Validações de resposta das APIs
+        if (!climaResponse.ok) throw new Error('Erro ao buscar dados de clima.');
+        if (!geoResponse.ok) throw new Error('Erro ao buscar dados de geolocalização.');
 
         const climaData = await climaResponse.json();
-        
-        // Pegar a previsão do dia atual (geralmente o primeiro item do array)
-        const previsaoHoje = climaData.clima[0];
+        const geoData = await geoResponse.json();
 
-        // Passo 3: Combinar os dados e formatar a resposta
+        // VERIFICAÇÃO DE DADOS: Garantir que as respostas não estão vazias
+        if (!geoData.results || geoData.results.length === 0) {
+            return res.status(404).json({ erro: true, codigo: "COORDENADAS_NAO_ENCONTRADAS", mensagem: "Não foi possível encontrar coordenadas para a cidade informada.", nome_informado: nome });
+        }
+        if (!climaData.clima || climaData.clima.length === 0) {
+            return res.status(404).json({ erro: true, codigo: "CLIMA_NAO_ENCONTRADO", mensagem: "Não foi possível encontrar dados climáticos para a cidade informada.", nome_informado: nome });
+        }
+
+        const previsaoHoje = climaData.clima[0];
+        const localizacao = geoData.results[0];
+
+        // Passo 3: Buscar código IBGE de forma mais robusta
+        const municipiosResponse = await fetch(`https://brasilapi.com.br/api/ibge/municipios/v1/${estado}`);
+        if (!municipiosResponse.ok) throw new Error('Erro ao buscar dados do IBGE.');
+        
+        const municipios = await municipiosResponse.json();
+        const nomeNormalizado = normalizarNome(nome);
+        const municipioEncontrado = municipios.find(m => normalizarNome(m.nome) === nomeNormalizado);
+
+        // Passo 4: Montar a resposta final
         const respostaFinal = {
             nome: nome,
             estado: estado,
+            codigo_ibge: municipioEncontrado ? municipioEncontrado.codigo_ibge : "Não encontrado",
+            coordenadas: {
+                latitude: localizacao.latitude,
+                longitude: localizacao.longitude,
+            },
             clima: {
                 temperatura_min: previsaoHoje.min,
                 temperatura_max: previsaoHoje.max,
@@ -89,13 +102,12 @@ app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
         res.status(200).json(respostaFinal);
 
     } catch (error) {
-        // Tratamento de erro para falhas na comunicação com a API externa
         console.error(error);
         res.status(503).json({
             erro: true,
             codigo: "SERVICO_EXTERNO_INDISPONIVEL",
-            mensagem: "Não foi possível obter dados do serviço externo. Tente novamente em alguns instantes",
-            "servico": "Brasil API (CPTEC)"
+            mensagem: "Não foi possível obter dados de um dos serviços externos. Tente novamente em alguns instantes.",
+            servico: error.message // Fornece uma mensagem mais específica sobre qual serviço falhou
         });
     }
 });
@@ -119,14 +131,12 @@ app.get('/api/v1/cidades/:sigla_uf', (req, res) => {
 // ==========================================
 app.get('/api/v1/health', (req, res) => {
     try {
-        // Formato de resposta de sucesso (HTTP 200)
         res.status(200).json({
             status: "healthy",
             versao: "1.0.0",
             timestamp: new Date().toISOString()
         });
     } catch (error) {
-        // Caso ocorra algum problema interno ou serviço degradado
         res.status(200).json({
             status: "degraded",
             versao: "1.0.0",
@@ -137,11 +147,11 @@ app.get('/api/v1/health', (req, res) => {
 });
 
 
-// CORREÇÃO: Iniciar o servidor apenas se o arquivo for executado diretamente
+// Iniciar o servidor apenas se o arquivo for executado diretamente
 if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`[OK] Servidor rodando com sucesso em http://localhost:${PORT}`);
     });
 }
 
-module.exports = app; // Adicionado para permitir testes
+module.exports = app;
