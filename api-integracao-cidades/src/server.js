@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 
 const app = express();
-const PORT = 3000;
+const PORT = 3000; // Porta padrão obrigatória pela especificação do trabalho
 
 // Middlewares obrigatórios
 app.use(cors()); // Habilita o CORS para testes no navegador
@@ -12,6 +12,24 @@ app.use(express.json()); // Garante suporte a respostas em JSON
 const normalizarNome = (nome) => {
     return nome.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
 };
+
+
+// ==========================================
+// ROTA INICIAL: Menu de Navegação Amigável
+// Rota: GET /
+// ==========================================
+app.get('/', (req, res) => {
+    res.status(200).json({
+        mensagem: "Bem-vindo à API de Agregação de Dados Climáticos e Geográficos!",
+        status_servidor: "online",
+        rotas_disponiveis: {
+            health_check: "http://localhost:3000/api/v1/health",
+            busca_clima: "http://localhost:3000/api/v1/clima/Fortaleza",
+            listagem_cidades: "http://localhost:3000/api/v1/cidades/CE?limite=5"
+        }
+    });
+});
+
 
 // ==========================================
 // ENDPOINT 1: Clima da Cidade (IMPLEMENTADO)
@@ -30,32 +48,20 @@ app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
         });
     }
 
-    // Variável para rastrear qual serviço falhou para a resposta 503 
     let servicoAtual = "Brasil API - CPTEC";
 
     try {
         // Passo 1: Obter ID da cidade (para clima) e UF (para IBGE)
         servicoAtual = "Brasil API - CPTEC";
         const cidadeResponse = await fetch(`https://brasilapi.com.br/api/cptec/v1/cidade/${encodeURIComponent(nome_cidade)}`);
-        
         if (cidadeResponse.status === 404) {
-            return res.status(404).json({ 
-                erro: true, 
-                codigo: "CIDADE_NAO_ENCONTRADA", 
-                mensagem: "Nenhuma cidade encontrada com o nome informado", 
-                nome_informado: nome_cidade 
-            });
+            return res.status(404).json({ erro: true, codigo: "CIDADE_NAO_ENCONTRADA", mensagem: "Nenhuma cidade encontrada com o nome informado", nome_informado: nome_cidade });
         }
         if (!cidadeResponse.ok) throw new Error('CPTEC');
         
         const cidades = await cidadeResponse.json();
         if (cidades.length === 0) {
-            return res.status(404).json({ 
-                erro: true, 
-                codigo: "CIDADE_NAO_ENCONTRADA", 
-                mensagem: "Nenhuma cidade encontrada com o nome informado", 
-                nome_informado: nome_cidade 
-            });
+            return res.status(404).json({ erro: true, codigo: "CIDADE_NAO_ENCONTRADA", mensagem: "Nenhuma cidade encontrada com o nome informado", nome_informado: nome_cidade });
         }
         
         const cidadeEncontrada = cidades[0];
@@ -67,7 +73,7 @@ app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
             fetch(`https://brasilapi.com.br/api/cptec/v1/clima/previsao/${cidadeId}`)
         ]);
 
-        // Validações individuais para identificar qual serviço caiu de fato
+        // Validações de resposta das APIs
         if (!geoResponse.ok) { servicoAtual = "Open-Meteo"; throw new Error('Open-Meteo'); }
         if (!climaResponse.ok) { servicoAtual = "Brasil API - CPTEC"; throw new Error('CPTEC'); }
 
@@ -85,7 +91,7 @@ app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
         const previsaoHoje = climaData.clima[0];
         const localizacao = geoData.results[0];
 
-        // Passo 3: Buscar código IBGE
+        // Passo 3: Buscar código IBGE de forma mais robusta
         servicoAtual = "Brasil API - IBGE";
         const municipiosResponse = await fetch(`https://brasilapi.com.br/api/ibge/municipios/v1/${estado}`);
         if (!municipiosResponse.ok) throw new Error('IBGE');
@@ -94,7 +100,7 @@ app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
         const nomeNormalizado = normalizarNome(nome);
         const municipioEncontrado = municipios.find(m => normalizarNome(m.nome) === nomeNormalizado);
 
-        // Passo 4: Montar a resposta final 
+        // Passo 4: Montar a resposta final
         const respostaFinal = {
             nome: nome,
             estado: estado,
@@ -126,17 +132,71 @@ app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
     }
 });
 
+
 // ==========================================
 // ENDPOINT 2: Listagem de Cidades por Estado
 // Rota: GET /api/v1/cidades/{sigla_uf}
 // ==========================================
-app.get('/api/v1/cidades/:sigla_uf', (req, res) => {
-    // Esqueleto pronto para o Integrante 4 injetar a lógica
-    res.status(501).json({ 
-        erro: true, 
-        mensagem: "Rota em desenvolvimento pelo Integrante 4." 
-    });
+app.get('/api/v1/cidades/:sigla_uf', async (req, res) => {
+    const { sigla_uf } = req.params;
+    
+    const limiteParam = req.query.limite;
+    let limite = limiteParam ? parseInt(limiteParam, 10) : 10;
+
+    if (!sigla_uf || sigla_uf.length !== 2 || !/^[a-zA-Z]+$/.test(sigla_uf)) {
+        return res.status(400).json({
+            erro: true,
+            codigo: "SIGLA_UF_INVALIDA",
+            mensagem: "A sigla do estado deve conter exatamente 2 letras",
+            sigla_uf_informada: sigla_uf || ""
+        });
+    }
+
+    if (isNaN(limite) || limite < 1 || limite > 100) {
+        limite = 10;
+    }
+
+    const ufUpper = sigla_uf.toUpperCase();
+
+    try {
+        const response = await fetch(`https://brasilapi.com.br/api/ibge/municipios/v1/${ufUpper}`);
+
+        if (response.status === 404) {
+            return res.status(404).json({
+                erro: true,
+                codigo: "UF_NAO_ENCONTRADA",
+                mensagem: "Estado com a sigla informada não foi encontrado",
+                sigla_uf_informada: ufUpper
+            });
+        }
+
+        if (!response.ok) throw new Error('Brasil API - IBGE');
+
+        const dadosMunicipios = await response.json();
+
+        const cidadesLimitadas = dadosMunicipios
+            .slice(0, limite)
+            .map(municipio => ({
+                nome: municipio.nome
+            }));
+
+        return res.status(200).json({
+            uf: ufUpper,
+            quantidade_retornada: cidadesLimitadas.length,
+            cidades: cidadesLimitadas,
+            consultado_em: new Date().toISOString()
+        });
+
+    } catch (error) {
+        return res.status(503).json({
+            erro: true,
+            codigo: "SERVICO_EXTERNO_INDISPONIVEL",
+            mensagem: "Não foi possível obter dados do serviço externo. Tente novamente em alguns instantes",
+            servico: "Brasil API - IBGE"
+        });
+    }
 });
+
 
 // ==========================================
 // ENDPOINT 3: Health Check
@@ -158,6 +218,7 @@ app.get('/api/v1/health', (req, res) => {
         });
     }
 });
+
 
 // Iniciar o servidor apenas se o arquivo for executado diretamente
 if (require.main === module) {
