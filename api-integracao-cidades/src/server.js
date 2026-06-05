@@ -1,5 +1,13 @@
 const express = require('express');
 const cors = require('cors');
+const {
+    NOME_SERVICO: SERVICO_CPTEC,
+    validarNomeCidade,
+    buscarCidadeCptec,
+    buscarPrevisaoClima,
+    formatarDadosClima,
+    erroClimaNaoEncontrado
+} = require('./services/climaService');
 
 const app = express();
 const PORT = 3000; // Porta padrão obrigatória pela especificação do trabalho
@@ -18,7 +26,7 @@ const normalizarNome = (nome) => {
 // ROTA INICIAL: Menu de Navegação Amigável
 // Rota: GET /
 // ==========================================
-app.get('/', (req, res) => {
+app.get('/', (_req, res) => {
     res.status(200).json({
         mensagem: "Bem-vindo à API de Agregação de Dados Climáticos e Geográficos!",
         status_servidor: "online",
@@ -38,58 +46,40 @@ app.get('/', (req, res) => {
 app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
     const { nome_cidade } = req.params;
 
-    // Validação do nome da cidade
-    if (!nome_cidade || nome_cidade.length < 2) {
-        return res.status(400).json({
-            erro: true,
-            codigo: "NOME_INVALIDO",
-            mensagem: "O nome da cidade deve conter pelo menos 2 caracteres",
-            nome_informado: nome_cidade || ""
-        });
+    const erroValidacao = validarNomeCidade(nome_cidade);
+    if (erroValidacao) {
+        return res.status(400).json(erroValidacao);
     }
 
-    let servicoAtual = "Brasil API - CPTEC";
+    let servicoAtual = SERVICO_CPTEC;
 
     try {
-        // Passo 1: Obter ID da cidade (para clima) e UF (para IBGE)
-        servicoAtual = "Brasil API - CPTEC";
-        const cidadeResponse = await fetch(`https://brasilapi.com.br/api/cptec/v1/cidade/${encodeURIComponent(nome_cidade)}`);
-        if (cidadeResponse.status === 404) {
-            return res.status(404).json({ erro: true, codigo: "CIDADE_NAO_ENCONTRADA", mensagem: "Nenhuma cidade encontrada com o nome informado", nome_informado: nome_cidade });
+        // Passo 1 (Clima): Obter ID da cidade no CPTEC e UF para consultas seguintes
+        servicoAtual = SERVICO_CPTEC;
+        const resultadoCidade = await buscarCidadeCptec(nome_cidade);
+        if (!resultadoCidade.sucesso) {
+            return res.status(resultadoCidade.status).json(resultadoCidade.body);
         }
-        if (!cidadeResponse.ok) throw new Error('CPTEC');
-        
-        const cidades = await cidadeResponse.json();
-        if (cidades.length === 0) {
-            return res.status(404).json({ erro: true, codigo: "CIDADE_NAO_ENCONTRADA", mensagem: "Nenhuma cidade encontrada com o nome informado", nome_informado: nome_cidade });
-        }
-        
-        const cidadeEncontrada = cidades[0];
-        const { nome, estado, id: cidadeId } = cidadeEncontrada;
 
-        // Passo 2: Buscar dados de geolocalização e clima em paralelo
-        const [geoResponse, climaResponse] = await Promise.all([
+        const { nome, estado, id: cidadeId } = resultadoCidade.cidade;
+
+        // Passo 2: Coordenadas (Localização) e previsão (Clima) em paralelo
+        const [geoResponse, resultadoClima] = await Promise.all([
             fetch(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(nome)}&language=pt&count=1`),
-            fetch(`https://brasilapi.com.br/api/cptec/v1/clima/previsao/${cidadeId}`)
+            buscarPrevisaoClima(cidadeId)
         ]);
 
-        // Validações de resposta das APIs
         if (!geoResponse.ok) { servicoAtual = "Open-Meteo"; throw new Error('Open-Meteo'); }
-        if (!climaResponse.ok) { servicoAtual = "Brasil API - CPTEC"; throw new Error('CPTEC'); }
+        if (!resultadoClima.sucesso) {
+            return res.status(404).json(erroClimaNaoEncontrado(nome));
+        }
 
-        const climaData = await climaResponse.json();
         const geoData = await geoResponse.json();
+        const localizacao = geoData.results?.[0];
 
-        // VERIFICAÇÃO DE DADOS: Garantir que as respostas não estão vazias
-        if (!geoData.results || geoData.results.length === 0) {
+        if (!localizacao) {
             return res.status(404).json({ erro: true, codigo: "COORDENADAS_NAO_ENCONTRADAS", mensagem: "Não foi possível encontrar coordenadas para a cidade informada.", nome_informado: nome });
         }
-        if (!climaData.clima || climaData.clima.length === 0) {
-            return res.status(404).json({ erro: true, codigo: "CLIMA_NAO_ENCONTRADO", mensagem: "Não foi possível encontrar dados climáticos para a cidade informada.", nome_informado: nome });
-        }
-
-        const previsaoHoje = climaData.clima[0];
-        const localizacao = geoData.results[0];
 
         // Passo 3: Buscar código IBGE de forma mais robusta
         servicoAtual = "Brasil API - IBGE";
@@ -109,20 +99,13 @@ app.get('/api/v1/clima/:nome_cidade', async (req, res) => {
                 latitude: localizacao.latitude,
                 longitude: localizacao.longitude,
             },
-            clima: {
-                temperatura_min: previsaoHoje.min,
-                temperatura_max: previsaoHoje.max,
-                condicao: previsaoHoje.condicao_desc,
-                unidades: {
-                    temperatura: "°C"
-                }
-            },
+            clima: formatarDadosClima(resultadoClima.previsao),
             consultado_em: new Date().toISOString()
         };
 
         res.status(200).json(respostaFinal);
 
-    } catch (error) {
+    } catch (_error) {
         res.status(503).json({
             erro: true,
             codigo: "SERVICO_EXTERNO_INDISPONIVEL",
@@ -187,7 +170,7 @@ app.get('/api/v1/cidades/:sigla_uf', async (req, res) => {
             consultado_em: new Date().toISOString()
         });
 
-    } catch (error) {
+    } catch (_error) {
         return res.status(503).json({
             erro: true,
             codigo: "SERVICO_EXTERNO_INDISPONIVEL",
@@ -202,14 +185,14 @@ app.get('/api/v1/cidades/:sigla_uf', async (req, res) => {
 // ENDPOINT 3: Health Check
 // Rota: GET /api/v1/health
 // ==========================================
-app.get('/api/v1/health', (req, res) => {
+app.get('/api/v1/health', (_req, res) => {
     try {
         res.status(200).json({
             status: "healthy",
             versao: "1.0.0",
             timestamp: new Date().toISOString()
         });
-    } catch (error) {
+    } catch (_error) {
         res.status(200).json({
             status: "degraded",
             versao: "1.0.0",
